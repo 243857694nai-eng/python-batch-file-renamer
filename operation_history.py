@@ -49,6 +49,9 @@ def protect_path(path, history_dir=None):
     for root in roots:
         if resolved.is_relative_to(root.resolve(strict=False)):
             raise HistoryError(f"历史或版本备份目录受到保护，不能重命名其中的文件：{path}")
+    operation_folder = resolved if resolved.is_dir() else resolved.parent
+    if operation_folder.exists() and operation_folder.samefile(PROJECT_ROOT):
+        raise HistoryError("程序自身所在目录受到保护，不能在此目录重命名或撤销文件。请选择独立的测试子目录。")
     if path.is_file():
         for root in (PROJECT_ROOT / ".rename_history", history_dir):
             for name in (DATABASE_NAME, "writer.lock", DATABASE_NAME + "-journal", DATABASE_NAME + "-wal", DATABASE_NAME + "-shm"):

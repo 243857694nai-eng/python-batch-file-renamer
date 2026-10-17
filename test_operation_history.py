@@ -13,8 +13,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 import operation_history
-from operation_history import HistoryError, HistoryStore
+from operation_history import HistoryError, HistoryStore, protect_path
 from rename_tool import CONFIRM_TEXT, ExecutionError, RenameError, RenameItem, execute_plan, file_digest, file_snapshot, main, make_plan
+from undo_tool import UndoError, confirmation_text, execute_undo, make_undo_plan
 
 
 class OperationHistoryTests(unittest.TestCase):
@@ -417,6 +418,131 @@ rename_tool.execute_plan(rename_tool.make_plan(Path(sys.argv[2])), rename_tool.C
         with self.assertRaises(RenameError):
             execute_plan(plan, CONFIRM_TEXT)
         self.assertTrue(source.exists())
+        self.assertFalse(self.history.exists())
+
+    def simulated_program(self):
+        program = self.root / "模拟程序"
+        program.mkdir()
+        (program / "rename_tool.py").write_text("模拟源码，不执行", encoding="utf-8")
+        return program
+
+    def test_program_directory_path_variants_are_rejected_before_hashing(self):
+        program = self.simulated_program()
+        child = program / "空子目录"
+        child.mkdir()
+        variants = [program, str(program) + os.sep, child / "..",
+                    Path(os.path.relpath(program, Path.cwd())), Path(str(program).swapcase())]
+        if os.name == "nt":
+            variants.append(Path("\\\\?\\" + str(program)))
+        original = (program / "rename_tool.py").read_bytes()
+        with patch("operation_history.PROJECT_ROOT", program), patch("rename_tool.file_digest") as digest:
+            for path in variants:
+                with self.subTest(path=path), self.assertRaisesRegex(RenameError, "程序自身所在目录"):
+                    make_plan(path)
+            digest.assert_not_called()
+        self.assertEqual((program / "rename_tool.py").read_bytes(), original)
+        self.assertFalse(self.history.exists())
+
+    def test_cli_rejects_program_directory_even_without_matching_files(self):
+        program = self.simulated_program()
+        output = io.StringIO()
+        with patch("operation_history.PROJECT_ROOT", program), patch("builtins.input") as prompt, contextlib.redirect_stdout(output):
+            self.assertEqual(main(["--folder", str(program), "--extension", ".csv", "--apply"]), 1)
+            prompt.assert_not_called()
+        self.assertIn("程序自身所在目录", output.getvalue())
+        self.assertFalse(self.history.exists())
+
+    def test_direct_execution_cannot_rename_program_source(self):
+        program = self.simulated_program()
+        source = program / "rename_tool.py"
+        plan = [RenameItem(source, program / "新名字.py", file_snapshot(source), file_digest(source))]
+        original = source.read_bytes()
+        with patch("operation_history.PROJECT_ROOT", program), patch("rename_tool.os.rename") as rename:
+            with self.assertRaisesRegex(HistoryError, "程序自身所在目录"):
+                execute_plan(plan, CONFIRM_TEXT)
+            rename.assert_not_called()
+        self.assertEqual(source.read_bytes(), original)
+        self.assertFalse(plan[0].target.exists())
+        self.assertFalse(self.history.exists())
+
+    def test_nonexistent_target_in_program_directory_is_protected(self):
+        program = self.simulated_program()
+        target = program / "尚不存在.py"
+        with patch("operation_history.PROJECT_ROOT", program):
+            with self.assertRaisesRegex(HistoryError, "程序自身所在目录"):
+                protect_path(target)
+        self.assertFalse(target.exists())
+
+    def test_independent_program_child_allows_rename_and_undo(self):
+        program = self.simulated_program()
+        child = program / "独立临时数据"
+        child.mkdir()
+        source = child / "a.txt"
+        source.write_text("临时数据", encoding="utf-8")
+        original = source.read_bytes()
+        program_before = (program / "rename_tool.py").read_bytes()
+        with patch("operation_history.PROJECT_ROOT", program):
+            execute_plan(make_plan(child, extension=".txt"), CONFIRM_TEXT)
+            self.assertFalse(source.exists())
+            operation_id = self.latest()["id"]
+            execute_undo(make_undo_plan(operation_id), confirmation_text(operation_id))
+            self.assertEqual(self.latest()["undo_status"], "undone")
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual((program / "rename_tool.py").read_bytes(), program_before)
+
+    def test_undo_cannot_process_a_recorded_program_directory(self):
+        program = self.simulated_program()
+        execute_plan(make_plan(program), CONFIRM_TEXT)
+        operation_id = self.latest()["id"]
+        before = {path.name: path.read_bytes() for path in program.iterdir()}
+        database = self.history / operation_history.DATABASE_NAME
+        database_before = database.read_bytes()
+        with patch("operation_history.PROJECT_ROOT", program), patch("undo_tool.os.rename") as rename:
+            with self.assertRaisesRegex(UndoError, "程序自身所在目录"):
+                make_undo_plan(operation_id)
+            rename.assert_not_called()
+        self.assertEqual({path.name: path.read_bytes() for path in program.iterdir()}, before)
+        self.assertEqual(database.read_bytes(), database_before)
+
+    @unittest.skipUnless(os.name == "nt", "Windows 目录联接测试")
+    def test_junction_alias_to_program_directory_is_rejected(self):
+        program = self.simulated_program()
+        alias = self.root / "目录联接别名"
+        result = subprocess.run(["cmd.exe", "/d", "/c", "mklink", "/J", str(alias), str(program)],
+                                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.addCleanup(alias.rmdir)
+        self.assertTrue(alias.is_junction())
+        with patch("operation_history.PROJECT_ROOT", program):
+            with self.assertRaisesRegex(RenameError, "目录联接"):
+                make_plan(alias)
+        self.assertTrue((program / "rename_tool.py").exists())
+        self.assertFalse(self.history.exists())
+
+    def test_symbolic_link_detection_still_rejects_directory_alias(self):
+        program = self.simulated_program()
+        alias = self.root / "模拟符号链接"
+        alias.mkdir()
+        original = Path.is_symlink
+
+        def is_link(path):
+            return path == alias or original(path)
+
+        with patch("operation_history.PROJECT_ROOT", program), patch.object(Path, "is_symlink", is_link):
+            with self.assertRaisesRegex(RenameError, "符号链接"):
+                make_plan(alias)
+        self.assertFalse(self.history.exists())
+
+    def test_unrelated_directory_with_same_name_remains_allowed(self):
+        program = self.simulated_program()
+        parent = self.root / "其他目录"
+        parent.mkdir()
+        unrelated = parent / program.name
+        unrelated.mkdir()
+        (unrelated / "a.txt").write_text("独立数据", encoding="utf-8")
+        with patch("operation_history.PROJECT_ROOT", program):
+            plan = make_plan(unrelated)
+        self.assertEqual([item.source.name for item in plan], ["a.txt"])
         self.assertFalse(self.history.exists())
 
 
