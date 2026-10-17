@@ -39,6 +39,8 @@ def file_snapshot(path):
     if path.is_symlink() or not path.is_file():
         raise RenameError(f"文件已不存在，或不再是普通文件：{path.name}")
     info = path.stat()
+    if info.st_nlink != 1:
+        raise RenameError(f"文件存在多个硬链接或链接数异常（{info.st_nlink}），拒绝处理：{path.name}")
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
 
 

@@ -227,6 +227,24 @@ class UndoToolTests(unittest.TestCase):
         with self.assertRaisesRegex(UndoError, "硬链接"):
             make_undo_plan(self.operation_id)
 
+    def test_hardlink_added_after_undo_preview_is_rejected_without_changes(self):
+        self.prepare()
+        plan = make_undo_plan(self.operation_id)
+        source = self.folder / "学习文件001.txt"
+        alias = self.root / "预览后新增别名.txt"
+        os.link(source, alias)
+        before = self.snapshot()
+        database_before = self.database.read_bytes()
+        with patch("undo_tool.os.rename") as rename:
+            with self.assertRaisesRegex(UndoError, "硬链接"):
+                execute_undo(plan, confirmation_text(self.operation_id))
+            rename.assert_not_called()
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.database.read_bytes(), database_before)
+        self.assertEqual(self.operation()["undo_attempts"], [])
+        self.assertEqual(source.read_bytes(), alias.read_bytes())
+        self.assertTrue(source.samefile(alias))
+
     def test_conflict_after_preview_is_rechecked_before_any_change(self):
         self.prepare()
         plan = make_undo_plan(self.operation_id)

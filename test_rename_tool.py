@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from operation_history import HistoryStore
 from rename_tool import CONFIRM_TEXT, ExecutionError, RenameError, execute_plan, file_digest, file_snapshot, main, make_plan, validate_plan
 
 
@@ -347,6 +348,94 @@ class RenameToolTests(unittest.TestCase):
             digest = file_digest(source)
         self.assertEqual(digest, hashlib.sha256(content).hexdigest().upper())
         self.assertGreater(len(sizes), 2)
+
+    def test_single_link_regular_file_still_allows_confirmed_execution(self):
+        source = self.write_file("a.txt")
+        self.assertEqual(source.stat().st_nlink, 1)
+        before = self.content_snapshot()
+        plan = make_plan(self.folder)
+        with patch("rename_tool.os.rename") as rename:
+            self.assertEqual(execute_plan(plan, CONFIRM_TEXT), plan)
+            rename.assert_called_once_with(plan[0].source, plan[0].target)
+        self.assertEqual(self.content_snapshot(), before)
+
+    def test_preview_rejects_hardlink_with_alias_outside_selected_folder(self):
+        source = self.write_file("a.txt")
+        aliases = self.folder / "未选中的子目录"
+        aliases.mkdir()
+        alias = aliases / "别名.txt"
+        os.link(source, alias)
+        before = self.content_snapshot()
+        original = source.read_bytes()
+        self.assertEqual(source.stat().st_nlink, 2)
+        with self.assertRaisesRegex(RenameError, "硬链接"):
+            make_plan(self.folder)
+        self.assertEqual(self.content_snapshot(), before)
+        self.assertEqual(alias.read_bytes(), original)
+        self.assertTrue(source.samefile(alias))
+        self.assertFalse((self.folder / ".rename_history").exists())
+
+    def test_cli_preview_rejects_two_names_for_same_file_without_changes(self):
+        source = self.write_file("a.txt")
+        os.link(source, self.folder / "b.txt")
+        before = self.content_snapshot()
+        output = io.StringIO()
+        with patch("rename_tool.os.rename") as rename, contextlib.redirect_stdout(output):
+            self.assertEqual(main(["--folder", str(self.folder)]), 1)
+            rename.assert_not_called()
+        self.assertIn("硬链接", output.getvalue())
+        self.assertEqual(self.content_snapshot(), before)
+        self.assertFalse((self.folder / ".rename_history").exists())
+
+    def test_hardlink_added_after_preview_blocks_before_history_or_rename(self):
+        source = self.write_file("a.txt")
+        plan = make_plan(self.folder)
+        alias = self.folder / "别名.txt"
+        os.link(source, alias)
+        info = source.stat()
+        self.assertEqual((info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns), plan[0].snapshot)
+        before = self.content_snapshot()
+        with patch("rename_tool.HistoryStore") as store, patch("rename_tool.os.rename") as rename:
+            with self.assertRaisesRegex(RenameError, "硬链接"):
+                execute_plan(plan, CONFIRM_TEXT)
+            store.assert_not_called()
+            rename.assert_not_called()
+        self.assertEqual(self.content_snapshot(), before)
+        self.assertTrue(source.samefile(alias))
+
+    def test_hardlink_added_after_batch_check_is_rejected_and_recorded_failed(self):
+        source = self.write_file("a.txt")
+        plan = make_plan(self.folder)
+        alias = self.folder / "别名.txt"
+        original = source.read_bytes()
+        begin = HistoryStore.begin_operation
+
+        def begin_then_add_link(store, folder, rows):
+            operation_id = begin(store, folder, rows)
+            os.link(source, alias)
+            return operation_id
+
+        with patch.object(HistoryStore, "begin_operation", begin_then_add_link), patch("rename_tool.os.rename") as rename:
+            with self.assertRaisesRegex(ExecutionError, "硬链接") as caught:
+                execute_plan(plan, CONFIRM_TEXT)
+            rename.assert_not_called()
+        self.assertEqual(caught.exception.completed, [])
+        self.assertFalse(caught.exception.needs_review)
+        operation = HistoryStore.read_history()[0]
+        self.assertEqual(operation["status"], "failed")
+        self.assertEqual(operation["items"][0]["status"], "failed")
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(alias.read_bytes(), original)
+        self.assertTrue(source.samefile(alias))
+
+    def test_unselected_hardlinked_type_does_not_block_txt_preview(self):
+        self.write_file("a.txt")
+        source = self.write_file("b.csv")
+        os.link(source, self.folder / "c.csv")
+        before = self.content_snapshot()
+        plan = make_plan(self.folder, extension=".txt")
+        self.assertEqual([item.source.name for item in plan], ["a.txt"])
+        self.assertEqual(self.content_snapshot(), before)
 
 
 if __name__ == "__main__":
