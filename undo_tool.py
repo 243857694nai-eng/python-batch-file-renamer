@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from operation_history import HistoryError, HistoryStore, protect_path
-from rename_tool import RenameError, file_digest, file_snapshot
+from rename_tool import RenameError, directory_identity, file_digest, file_snapshot, verify_rename_result
 
 
 class UndoError(Exception):
@@ -157,6 +157,7 @@ def execute_undo(plan, confirmation):
         fresh = make_undo_plan(plan.operation_id)
         if fresh != plan:
             raise UndoError("账本或文件状态在预览后发生变化，请重新预览。")
+        expected_directory = directory_identity(plan.folder)
         rows = [{"forward_position": item.forward_position, "source_name": item.source.name,
                  "target_name": item.target.name, "sha256": item.sha256, "before_state": item.snapshot} for item in plan.items]
         attempt_id = store.begin_undo(plan.operation_id, plan.folder, rows)
@@ -179,6 +180,7 @@ def execute_undo(plan, confirmation):
                     store.mark_undo_failed(attempt_id, position, error)
                     store.finish_undo(attempt_id)
                     raise UndoExecutionError(f"撤销 {item.source.name} 时停止：{error}", completed, attempt_id) from error
+                verify_rename_result(item, expected_directory)
                 store.mark_undo_success(attempt_id, position)
                 completed.append(item)
             store.finish_undo(attempt_id)

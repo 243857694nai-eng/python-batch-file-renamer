@@ -154,6 +154,34 @@ def file_digest(path):
     return digest.hexdigest().upper()
 
 
+def directory_identity(folder):
+    """只比较目录身份，不比较会随改名正常变化的目录时间。"""
+    protect_path(folder)
+    if not folder.is_dir():
+        raise RenameError(f"操作目录已不存在或类型异常：{folder}")
+    info = folder.stat()
+    return (info.st_dev, info.st_ino)
+
+
+def verify_rename_result(item, expected_directory):
+    """改名返回后再检测；任何异常交给调用方保留为待核查。"""
+    if directory_identity(item.target.parent) != expected_directory:
+        raise RenameError("操作后目录身份发生变化，结果待核查。")
+    protect_path(item.source)
+    protect_path(item.target)
+    if os.path.lexists(item.source):
+        raise RenameError(f"操作后原路径仍存在或重新出现：{item.source.name}")
+    # 保留文件身份、大小和内容修改时间；不使用 atime、ctime 或目录时间。
+    if file_snapshot(item.target) != item.snapshot:
+        raise RenameError(f"操作后目标身份、大小或内容修改时间异常：{item.target.name}")
+    if file_digest(item.target) != item.sha256:
+        raise RenameError(f"操作后目标 SHA256 不一致：{item.target.name}")
+    if file_snapshot(item.target) != item.snapshot:
+        raise RenameError(f"操作后复核期间目标状态变化：{item.target.name}")
+    if directory_identity(item.target.parent) != expected_directory or os.path.lexists(item.source):
+        raise RenameError("操作后复核期间目录或原路径状态变化，结果待核查。")
+
+
 def execute_plan(plan, confirmation):
     # 无论调用入口是什么，没有准确的确认文字，都不允许执行。
     if confirmation != CONFIRM_TEXT:
@@ -170,6 +198,7 @@ def execute_plan(plan, confirmation):
             raise RenameError("计划必须只包含同一个目录内的绝对路径。")
         protect_path(item.source, store.directory)
         protect_path(item.target, store.directory)
+    expected_directory = directory_identity(folder)
     rows = []
     for item in plan:
         rows.append({"original_name": item.source.name, "new_name": item.target.name,
@@ -202,6 +231,7 @@ def execute_plan(plan, confirmation):
                         store.finish(operation_id)
                         raise ExecutionError(f"处理 {item.source.name} 时停止：{error}", completed, operation_id) from error
                     raise
+                verify_rename_result(item, expected_directory)
                 # 若这里保存失败，不把这一项加入“已确认成功”清单。
                 store.mark_success(operation_id, position)
                 completed.append(item)

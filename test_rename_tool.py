@@ -99,7 +99,7 @@ class RenameToolTests(unittest.TestCase):
         self.write_file("c.md", "# 原始说明")
         self.write_file("d.TXT", "第二份文本")
         before = self.content_snapshot()
-        with patch("builtins.input", return_value=CONFIRM_TEXT), patch("rename_tool.os.name", "nt"), patch("rename_tool.os.rename") as rename, contextlib.redirect_stdout(io.StringIO()):
+        with patch("builtins.input", return_value=CONFIRM_TEXT), patch("rename_tool.os.name", "nt"), patch("rename_tool.os.rename") as rename, patch("rename_tool.verify_rename_result"), contextlib.redirect_stdout(io.StringIO()):
             result = main(["--folder", str(self.folder), "--extension", ".txt", "--apply"])
         self.assertEqual(result, 0)
         self.assertEqual(
@@ -214,7 +214,7 @@ class RenameToolTests(unittest.TestCase):
     def test_execution_calls_are_simulated(self):
         self.write_file("a.txt")
         plan = make_plan(self.folder)
-        with patch("rename_tool.os.name", "nt"), patch("rename_tool.os.rename") as rename:
+        with patch("rename_tool.os.name", "nt"), patch("rename_tool.os.rename") as rename, patch("rename_tool.verify_rename_result"):
             completed = execute_plan(plan, CONFIRM_TEXT)
             rename.assert_called_once_with(plan[0].source, plan[0].target)
         self.assertEqual(completed, plan)
@@ -225,7 +225,7 @@ class RenameToolTests(unittest.TestCase):
         self.write_file("b.txt")
         self.write_file("c.txt")
         plan = make_plan(self.folder)
-        with patch("rename_tool.os.name", "nt"), patch("rename_tool.os.rename", side_effect=[None, PermissionError("模拟拒绝访问")]) as rename:
+        with patch("rename_tool.os.name", "nt"), patch("rename_tool.os.rename", side_effect=[None, PermissionError("模拟拒绝访问")]) as rename, patch("rename_tool.verify_rename_result"):
             with self.assertRaises(ExecutionError) as caught:
                 execute_plan(plan, CONFIRM_TEXT)
             self.assertEqual(rename.call_count, 2)
@@ -354,7 +354,7 @@ class RenameToolTests(unittest.TestCase):
         self.assertEqual(source.stat().st_nlink, 1)
         before = self.content_snapshot()
         plan = make_plan(self.folder)
-        with patch("rename_tool.os.rename") as rename:
+        with patch("rename_tool.os.rename") as rename, patch("rename_tool.verify_rename_result"):
             self.assertEqual(execute_plan(plan, CONFIRM_TEXT), plan)
             rename.assert_called_once_with(plan[0].source, plan[0].target)
         self.assertEqual(self.content_snapshot(), before)
