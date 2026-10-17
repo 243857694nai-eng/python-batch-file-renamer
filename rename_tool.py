@@ -19,6 +19,7 @@ class RenameItem:
     source: Path
     target: Path
     snapshot: tuple
+    sha256: str
 
 
 class RenameError(Exception):
@@ -116,7 +117,11 @@ def make_plan(folder, prefix="学习文件", start=1, extension=None):
         target_names.add(new_name.casefold())
         if new_name != source.name and new_name.casefold() in existing_names:
             raise RenameError(f"目标名字已被占用：{new_name}。请换一个前缀。")
-        plan.append(RenameItem(source, folder / new_name, file_snapshot(source)))
+        snapshot = file_snapshot(source)
+        digest = file_digest(source)
+        if file_snapshot(source) != snapshot:
+            raise RenameError(f"生成预览期间文件发生变化：{source.name}。请重新预览。")
+        plan.append(RenameItem(source, folder / new_name, snapshot, digest))
     return plan
 
 
@@ -129,6 +134,10 @@ def validate_plan(plan):
             names = {path.name.casefold() for path in item.source.parent.iterdir()}
             if item.target.name.casefold() in names:
                 raise RenameError(f"目标名字已被占用：{item.target.name}。未覆盖任何文件。")
+        if file_digest(item.source) != item.sha256:
+            raise RenameError(f"预览后文件内容发生变化（SHA256 不一致）：{item.source.name}。请重新预览。")
+        if file_snapshot(item.source) != item.snapshot:
+            raise RenameError(f"文件状态已变化，请重新预览：{item.source.name}")
 
 
 def file_digest(path):
@@ -161,11 +170,8 @@ def execute_plan(plan, confirmation):
         protect_path(item.target, store.directory)
     rows = []
     for item in plan:
-        digest = file_digest(item.source)
-        if file_snapshot(item.source) != item.snapshot:
-            raise RenameError(f"文件状态已变化，请重新预览：{item.source.name}")
         rows.append({"original_name": item.source.name, "new_name": item.target.name,
-                     "sha256": digest, "before_state": item.snapshot})
+                     "sha256": item.sha256, "before_state": item.snapshot})
     completed = []
     with store:
         operation_id = store.begin_operation(folder, rows)
@@ -175,8 +181,6 @@ def execute_plan(plan, confirmation):
                     continue
                 try:
                     validate_plan([item])
-                    if file_digest(item.source) != rows[position]["sha256"]:
-                        raise RenameError(f"文件内容发生变化：{item.source.name}")
                     protect_path(item.source, store.directory)
                     protect_path(item.target, store.directory)
                 except (OSError, RenameError, HistoryError) as error:

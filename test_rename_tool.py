@@ -3,12 +3,13 @@
 import contextlib
 import hashlib
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rename_tool import CONFIRM_TEXT, ExecutionError, RenameError, execute_plan, main, make_plan
+from rename_tool import CONFIRM_TEXT, ExecutionError, RenameError, execute_plan, file_digest, file_snapshot, main, make_plan, validate_plan
 
 
 class RenameToolTests(unittest.TestCase):
@@ -235,6 +236,117 @@ class RenameToolTests(unittest.TestCase):
         with patch("rename_tool.os.name", "nt"), patch("rename_tool.os.rename") as rename:
             self.assertEqual(execute_plan(plan, CONFIRM_TEXT), [])
             rename.assert_not_called()
+
+    def change_content_preserving_metadata(self, path):
+        before = path.stat()
+        content = path.read_bytes()
+        path.write_bytes(content[:-1] + (b"0" if content[-1:] != b"0" else b"1"))
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    def test_preview_captures_sha256_without_changing_files_or_history(self):
+        self.write_file("a.txt", "原始测试内容")
+        self.write_file("b.txt", "")
+        before = self.content_snapshot()
+        plan = make_plan(self.folder)
+        self.assertEqual({item.source.name: item.sha256.lower() for item in plan}, before)
+        self.assertEqual(self.content_snapshot(), before)
+        self.assertFalse((self.folder / ".rename_history").exists())
+
+    def test_same_size_and_mtime_content_change_rejects_old_plan_before_history(self):
+        source = self.write_file("a.txt")
+        plan = make_plan(self.folder)
+        self.change_content_preserving_metadata(source)
+        self.assertEqual(file_snapshot(source), plan[0].snapshot)
+        self.assertNotEqual(file_digest(source), plan[0].sha256)
+        with patch("rename_tool.HistoryStore") as store, patch("rename_tool.os.rename") as rename:
+            with self.assertRaisesRegex(RenameError, "SHA256"):
+                execute_plan(plan, CONFIRM_TEXT)
+            store.assert_not_called()
+            rename.assert_not_called()
+
+    def test_changed_second_file_blocks_entire_old_batch(self):
+        self.write_file("a.txt")
+        source = self.write_file("b.txt")
+        plan = make_plan(self.folder)
+        self.change_content_preserving_metadata(source)
+        before = self.content_snapshot()
+        with patch("rename_tool.HistoryStore") as store, patch("rename_tool.os.rename") as rename:
+            with self.assertRaisesRegex(RenameError, "SHA256"):
+                execute_plan(plan, CONFIRM_TEXT)
+            store.assert_not_called()
+            rename.assert_not_called()
+        self.assertEqual(self.content_snapshot(), before)
+
+    def test_cli_rejects_same_metadata_change_after_preview_and_confirmation(self):
+        source = self.write_file("a.txt")
+
+        def confirm_after_change(prompt):
+            self.change_content_preserving_metadata(source)
+            return CONFIRM_TEXT
+
+        output = io.StringIO()
+        with patch("builtins.input", side_effect=confirm_after_change), patch("rename_tool.os.rename") as rename, contextlib.redirect_stdout(output):
+            self.assertEqual(main(["--folder", str(self.folder), "--apply"]), 1)
+            rename.assert_not_called()
+        self.assertIn("SHA256", output.getvalue())
+        self.assertFalse((self.folder / ".rename_history").exists())
+
+    def test_new_preview_accepts_current_content_but_old_preview_stays_invalid(self):
+        source = self.write_file("a.txt")
+        old = make_plan(self.folder)
+        self.change_content_preserving_metadata(source)
+        fresh = make_plan(self.folder)
+        self.assertNotEqual(old[0].sha256, fresh[0].sha256)
+        self.assertEqual(old[0].snapshot, fresh[0].snapshot)
+        with self.assertRaisesRegex(RenameError, "SHA256"):
+            validate_plan(old)
+        validate_plan(fresh)
+        self.assertFalse((self.folder / ".rename_history").exists())
+
+    def test_no_op_candidate_content_change_also_invalidates_old_plan(self):
+        source = self.write_file("学习文件001.txt")
+        plan = make_plan(self.folder)
+        self.change_content_preserving_metadata(source)
+        with patch("rename_tool.os.rename") as rename:
+            with self.assertRaisesRegex(RenameError, "SHA256"):
+                execute_plan(plan, CONFIRM_TEXT)
+            rename.assert_not_called()
+        self.assertFalse((self.folder / ".rename_history").exists())
+
+    def test_extension_filter_hashes_only_matching_candidates(self):
+        self.write_file("a.txt")
+        self.write_file("b.csv")
+        self.write_file("c.TXT")
+        with patch("rename_tool.file_digest", wraps=file_digest) as digest:
+            plan = make_plan(self.folder, extension=".txt")
+        self.assertEqual([call.args[0].name for call in digest.call_args_list], ["a.txt", "c.TXT"])
+        self.assertEqual(len(plan), 2)
+
+    def test_preview_hash_read_error_creates_no_history_or_rename(self):
+        self.write_file("a.txt")
+        before = self.content_snapshot()
+        with patch("rename_tool.file_digest", side_effect=PermissionError("模拟文件不可读")), patch("rename_tool.os.rename") as rename, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["--folder", str(self.folder), "--apply"]), 1)
+            rename.assert_not_called()
+        self.assertEqual(self.content_snapshot(), before)
+        self.assertFalse((self.folder / ".rename_history").exists())
+
+    def test_file_digest_reads_large_content_in_bounded_blocks(self):
+        source = self.write_file("a.txt")
+        content = b"sample" * 500_000
+        sizes = []
+
+        class BoundedReader(io.BytesIO):
+            def read(self, size=-1):
+                sizes.append(size)
+                if size != 1024 * 1024:
+                    raise AssertionError("不允许一次读取整个文件")
+                return super().read(size)
+
+        with patch.object(Path, "open", return_value=BoundedReader(content)):
+            digest = file_digest(source)
+        self.assertEqual(digest, hashlib.sha256(content).hexdigest().upper())
+        self.assertGreater(len(sizes), 2)
 
 
 if __name__ == "__main__":

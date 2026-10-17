@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import operation_history
 from operation_history import HistoryError, HistoryStore
-from rename_tool import CONFIRM_TEXT, ExecutionError, RenameError, RenameItem, execute_plan, file_snapshot, main, make_plan
+from rename_tool import CONFIRM_TEXT, ExecutionError, RenameError, RenameItem, execute_plan, file_digest, file_snapshot, main, make_plan
 
 
 class OperationHistoryTests(unittest.TestCase):
@@ -348,7 +348,7 @@ rename_tool.execute_plan(rename_tool.make_plan(Path(sys.argv[2])), rename_tool.C
         self.history.mkdir()
         source = self.history / "a.txt"
         source.write_text("不能被改名", encoding="utf-8")
-        plan = [RenameItem(source, self.history / "b.txt", file_snapshot(source))]
+        plan = [RenameItem(source, self.history / "b.txt", file_snapshot(source), file_digest(source))]
         with patch("rename_tool.os.rename") as rename:
             with self.assertRaises(HistoryError):
                 execute_plan(plan, CONFIRM_TEXT)
@@ -413,7 +413,7 @@ rename_tool.execute_plan(rename_tool.make_plan(Path(sys.argv[2])), rename_tool.C
 
     def test_plan_cannot_target_a_different_directory(self):
         source = self.write("a.txt")
-        plan = [RenameItem(source, self.root / "未授权目录.txt", file_snapshot(source))]
+        plan = [RenameItem(source, self.root / "未授权目录.txt", file_snapshot(source), file_digest(source))]
         with self.assertRaises(RenameError):
             execute_plan(plan, CONFIRM_TEXT)
         self.assertTrue(source.exists())
