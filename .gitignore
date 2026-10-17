@@ -1,0 +1,43 @@
+# 正式操作账本
+/.rename_history/
+
+# SQLite 数据库及其回滚日志、WAL 和共享内存文件
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# 历史版本和数据库备份
+/版本备份/
+
+# 演示数据、真实测试数据及自动测试临时目录
+/测试文件/
+/临时真实测试_*/
+/操作记录真实测试_*/
+/安全撤销真实测试_*/
+/筛选预览测试_*/
+/筛选真实测试_*/
+/自动测试_*/
+/历史自动测试_*/
+/撤销自动测试_*/
+
+# 已有真实测试记录和测试基线
+/验证基线.json
+/安全撤销测试基线_*.json
+/操作记录真实测试基线_*.json
+/真实测试记录_*.json
+/筛选真实测试记录_*.json
+/筛选验证记录_*.json
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
